@@ -1,1 +1,330 @@
 
+
+
+<!DOCTYPE html>
+
+<html lang="zh-CN">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta name="viewport" content="width=device-width,initial-scale=1">
+
+<title>GPS 路线模拟器 8.0</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+
+<style>
+
+*{box-sizing:border-box}
+
+body{margin:0;background:#101827;color:white;font-family:-apple-system,Arial,sans-serif}
+
+main{max-width:700px;margin:auto;padding:16px}
+
+h2{text-align:center}
+
+p{color:#aab7ce}
+
+#map{height:48vh;min-height:300px;border-radius:16px;margin:16px 0}
+
+.panel{background:#213047;padding:15px;border-radius:14px;margin:12px 0}
+
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+
+.stat{text-align:center;background:#213047;padding:14px 5px;border-radius:12px}
+
+.stat strong{display:block;font-size:22px;margin-top:8px}
+
+button{border:0;border-radius:10px;padding:13px;font-size:15px;font-weight:bold;background:#7dd3fc;color:#082033}
+
+.actions{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+
+input{width:100%;padding:10px;margin:8px 0;background:#101827;border:1px solid #60718b;border-radius:8px;color:white;font-size:16px}
+
+small{color:#b4c4dc}
+
+</style>
+
+</head>
+
+<body>
+
+<main>
+
+<h2>🏃 GPS 路线模拟器 8.0</h2>
+
+<p>仅供地图及运动数据模拟测试</p>
+
+<div class="stats">
+
+<div class="stat">距离<strong id="distance">0.00 km</strong></div>
+
+<div class="stat">时间<strong id="time">00:00</strong></div>
+
+<div class="stat">配速<strong id="paceDisplay">--</strong></div>
+
+</div>
+
+<div id="map"></div>
+
+<div class="panel">
+
+<p id="hint">请先点击地图设置起点，再点击设置终点。</p>
+
+<label>模拟配速（分钟/公里）</label>
+
+<input id="pace" type="number" min="2" max="30" step="0.5" value="6">
+
+<div class="actions">
+
+<button onclick="resetRoute()">重新选点</button>
+
+<button onclick="startRun()">开始模拟</button>
+
+<button onclick="pauseRun()">暂停/继续</button>
+
+<button onclick="stopRun()">结束模拟</button>
+
+</div>
+
+</div>
+
+<small>模拟位置不会改变手机 GPS，也不会上传到第三方运动平台。</small>
+
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+
+const map=L.map("map").setView([30.3,120.2],12);
+
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{
+
+ attribution:"© OpenStreetMap contributors",
+
+ maxZoom:19
+
+}).addTo(map);
+
+let start=null,end=null;
+
+let markers=[],route=null,mover=null;
+
+let running=false,paused=false,finished=false;
+
+let elapsed=0,lastTime=0,raf=null;
+
+let totalMeters=0,progress=0;
+
+const $=id=>document.getElementById(id);
+
+function meters(a,b){
+
+ return map.distance(a,b);
+
+}
+
+function formatTime(sec){
+
+ let n=Math.floor(sec);
+
+ return String(Math.floor(n/60)).padStart(2,"0")+":"+
+
+ String(n%60).padStart(2,"0");
+
+}
+
+function update(){
+
+ $("distance").textContent=(totalMeters*progress/1000).toFixed(2)+" km";
+
+ $("time").textContent=formatTime(elapsed);
+
+ $("paceDisplay").textContent=$("pace").value+"′/km";
+
+}
+
+function clearVisuals(){
+
+ markers.forEach(x=>map.removeLayer(x));
+
+ markers=[];
+
+ if(route)map.removeLayer(route);
+
+ if(mover)map.removeLayer(mover);
+
+ route=null;mover=null;
+
+}
+
+function stopClock(){
+
+ running=false;
+
+ if(raf)cancelAnimationFrame(raf);
+
+ raf=null;
+
+}
+
+function resetRoute(){
+
+ stopClock();
+
+ clearVisuals();
+
+ start=null;end=null;elapsed=0;progress=0;
+
+ totalMeters=0;paused=false;finished=false;
+
+ $("hint").textContent="点击地图选择起点";
+
+ update();
+
+}
+
+map.on("click",e=>{
+
+ if(running)return;
+
+ if(!start){
+
+  start=e.latlng;
+
+  markers.push(L.marker(start).addTo(map).bindPopup("模拟起点"));
+
+  $("hint").textContent="请点击地图选择终点";
+
+ }else if(!end){
+
+  end=e.latlng;
+
+  markers.push(L.marker(end).addTo(map).bindPopup("模拟终点"));
+
+  route=L.polyline([start,end],{color:"#38bdf8",weight:5}).addTo(map);
+
+  mover=L.circleMarker(start,{radius:10,color:"#fff",fillColor:"#f97316",fillOpacity:1}).addTo(map);
+
+  totalMeters=meters(start,end);
+
+  map.fitBounds(route.getBounds(),{padding:[30,30]});
+
+  $("hint").textContent="路线已设置，点击开始模拟";
+
+ }
+
+});
+
+function tick(now){
+
+ if(!running||paused)return;
+
+ let delta=Math.min((now-lastTime)/1000,0.2);
+
+ lastTime=now;
+
+ elapsed+=delta;
+
+ const pace=Number($("pace").value);
+
+ const speed=1000/(pace*60);
+
+ progress=Math.min(1,elapsed*speed/totalMeters);
+
+ mover.setLatLng([
+
+  start.lat+(end.lat-start.lat)*progress,
+
+  start.lng+(end.lng-start.lng)*progress
+
+ ]);
+
+ update();
+
+ if(progress>=1){
+
+  stopClock();finished=true;
+
+  $("hint").textContent="模拟完成（测试数据）";
+
+  return;
+
+ }
+
+ raf=requestAnimationFrame(tick);
+
+}
+
+function startRun(){
+
+ if(!start||!end){alert("请先选择起点和终点");return;}
+
+ const pace=Number($("pace").value);
+
+ if(!Number.isFinite(pace)||pace<2||pace>30){
+
+  alert("配速请输入 2～30 分钟/公里");return;
+
+ }
+
+ if(totalMeters<10){alert("起点和终点距离至少 10 米");return;}
+
+ stopClock();
+
+ elapsed=0;progress=0;finished=false;paused=false;
+
+ mover.setLatLng(start);
+
+ running=true;lastTime=performance.now();
+
+ $("hint").textContent="正在模拟移动（非真实 GPS）";
+
+ raf=requestAnimationFrame(tick);
+
+}
+
+function pauseRun(){
+
+ if(!running)return;
+
+ if(!paused){
+
+  paused=true;
+
+  if(raf)cancelAnimationFrame(raf);
+
+  $("hint").textContent="模拟已暂停";
+
+ }else{
+
+  paused=false;lastTime=performance.now();
+
+  $("hint").textContent="正在模拟移动（非真实 GPS）";
+
+  raf=requestAnimationFrame(tick);
+
+ }
+
+}
+
+function stopRun(){
+
+ stopClock();
+
+ paused=false;
+
+ $("hint").textContent="模拟已结束（测试数据）";
+
+}
+
+update();
+
+</script>
+
+</body>
+
+</html>
