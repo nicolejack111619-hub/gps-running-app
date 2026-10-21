@@ -1,0 +1,705 @@
+
+
+<meta name="viewport" content="width=device-width,initial-scale=1">
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+
+<style>
+
+*{box-sizing:border-box}
+
+body{margin:0;background:#101827;color:white;font-family:-apple-system,Arial}
+
+.app{padding:15px;max-width:700px;margin:auto}
+
+h2{text-align:center}
+
+.sub{text-align:center;color:#9caec3;font-size:13px}
+
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:15px 0}
+
+.stat{background:#1e3048;border-radius:12px;padding:12px 4px;text-align:center;font-size:12px}
+
+.stat b{display:block;font-size:21px;margin-top:9px}
+
+#map{height:380px;border-radius:15px;background:#23334b}
+
+.tools,.actions{display:flex;gap:7px;margin:12px 0;flex-wrap:wrap}
+
+button{flex:1;padding:12px 5px;border:0;border-radius:10px;background:#64d5ff;color:#071525;font-weight:bold;font-size:13px}
+
+button.alt{background:#d7e0eb}
+
+button:disabled{opacity:.45}
+
+.panel{background:#1e3048;border-radius:12px;padding:14px;margin:12px 0;font-size:13px;line-height:2;overflow-wrap:anywhere}
+
+.good{color:#4ade80}
+
+.warn{color:#fbbf24}
+
+.history{margin-top:20px}
+
+.record{background:#1e3048;border-radius:10px;padding:12px;margin:8px 0;font-size:13px}
+
+#map.full{position:fixed!important;inset:0;width:100vw;height:100dvh;z-index:9999;border-radius:0}
+
+#exitFull{display:none;position:fixed;right:15px;top:55px;z-index:10000}
+
+#exitFull.show{display:block}
+
+</style>
+
+<div class="app">
+
+<h2>🏃 GPS 运动记录器 7.0</h2>
+
+<p class="sub">真实定位 · 地图 · 运动记录</p>
+
+<div class="stats">
+
+<div class="stat">距离<b id="distance">0.00 km</b></div>
+
+<div class="stat">时间<b id="time">00:00</b></div>
+
+<div class="stat">配速<b id="pace">--</b></div>
+
+</div>
+
+<div id="map"></div>
+
+<button id="exitFull" onclick="fullMap()">退出全屏</button>
+
+<div class="tools">
+
+<button onclick="centerMap()">📍 定位</button>
+
+<button onclick="switchLayer()">🛰️ <span id="layerName">卫星图</span></button>
+
+<button onclick="fullMap()">⛶ 全屏</button>
+
+</div>
+
+<div class="tools">
+
+<button class="alt" onclick="toggleFollow()" id="follow">跟随：开启</button>
+
+</div>
+
+<div class="panel">
+
+<div id="status">状态：等待开始</div>
+
+<div id="coords">位置：尚未获取</div>
+
+<div id="accuracy">定位精度：--</div>
+
+<div id="signal">GPS 信号：--</div>
+
+<div id="points">有效位置点：0</div>
+
+</div>
+
+<div class="actions">
+
+<button id="start" onclick="startRun()">开始记录</button>
+
+<button id="pause" class="alt" onclick="stopRun()" disabled>暂停</button>
+
+<button class="alt" onclick="resetRun()">重置</button>
+
+</div>
+
+<button onclick="saveRecord()">💾 保存本次记录</button>
+
+<div class="history">
+
+<h3>📋 历史运动记录</h3>
+
+<div id="historyList">暂无记录</div>
+
+<button class="alt" onclick="clearHistory()">清空历史</button>
+
+</div>
+
+<p class="sub">仅记录真实 GPS 移动，不向第三方平台上传数据。</p>
+
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+
+const $=id=>document.getElementById(id);
+
+let map,marker,accuracyCircle,track;
+
+let normalLayer,satelliteLayer;
+
+let satellite=false,follow=true;
+
+let latest=null,last=null;
+
+let watchId=null,clock=null;
+
+let running=false;
+
+let meters=0,points=0,elapsed=0,startedAt=0;
+
+let path=[];
+
+if(typeof L!=="undefined"){
+
+  map=L.map("map").setView([35,105],4);
+
+  normalLayer=L.tileLayer(
+
+    "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+
+    {maxZoom:19,attribution:"© OpenStreetMap contributors"}
+
+  );
+
+  satelliteLayer=L.tileLayer(
+
+    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+
+    {maxZoom:19,attribution:"Imagery © Esri"}
+
+  );
+
+  normalLayer.addTo(map);
+
+  track=L.polyline([],{
+
+    color:"#38bdf8",
+
+    weight:5
+
+  }).addTo(map);
+
+  setTimeout(()=>map.invalidateSize(),400);
+
+}else{
+
+  $("status").textContent="地图加载失败";
+
+}
+
+function switchLayer(){
+
+  if(!map)return;
+
+  if(satellite){
+
+    map.removeLayer(satelliteLayer);
+
+    normalLayer.addTo(map);
+
+  }else{
+
+    map.removeLayer(normalLayer);
+
+    satelliteLayer.addTo(map);
+
+  }
+
+  satellite=!satellite;
+
+  $("layerName").textContent=satellite?"普通图":"卫星图";
+
+}
+
+function centerMap(){
+
+  if(map&&latest){
+
+    map.setView([latest.lat,latest.lon],17);
+
+  }
+
+}
+
+function toggleFollow(){
+
+  follow=!follow;
+
+  $("follow").textContent="跟随："+(follow?"开启":"关闭");
+
+  if(follow)centerMap();
+
+}
+
+function fullMap(){
+
+  const el=$("map");
+
+  const active=el.classList.toggle("full");
+
+  $("exitFull").classList.toggle("show",active);
+
+  if(map)setTimeout(()=>map.invalidateSize(),150);
+
+  if(active)centerMap();
+
+}
+
+function rad(x){return x*Math.PI/180}
+
+function distanceBetween(a,b){
+
+  const dLat=rad(b.lat-a.lat);
+
+  const dLon=rad(b.lon-a.lon);
+
+  const v=Math.sin(dLat/2)**2+
+
+    Math.cos(rad(a.lat))*Math.cos(rad(b.lat))*
+
+    Math.sin(dLon/2)**2;
+
+  return 12742000*Math.atan2(Math.sqrt(v),Math.sqrt(1-v));
+
+}
+
+function duration(){
+
+  return elapsed+(running?(Date.now()-startedAt)/1000:0);
+
+}
+
+function formatTime(s){
+
+  s=Math.floor(s);
+
+  return String(Math.floor(s/60)).padStart(2,"0")
+
+    +":"+String(s%60).padStart(2,"0");
+
+}
+
+function render(){
+
+  const sec=duration();
+
+  $("distance").textContent=(meters/1000).toFixed(2)+" km";
+
+  $("time").textContent=formatTime(sec);
+
+  $("pace").textContent=meters>=50
+
+    ?formatTime(sec/(meters/1000))+"/km":"--";
+
+  $("points").textContent="有效位置点："+points;
+
+}
+
+function updateMap(p){
+
+  if(!map)return;
+
+  const ll=[p.lat,p.lon];
+
+  if(!marker){
+
+    marker=L.circleMarker(ll,{
+
+      radius:9,color:"white",weight:3,
+
+      fillColor:"#22c55e",fillOpacity:1
+
+    }).addTo(map);
+
+    accuracyCircle=L.circle(ll,{
+
+      radius:p.accuracy,color:"#60a5fa",
+
+      weight:1,fillOpacity:.08
+
+    }).addTo(map);
+
+    map.setView(ll,17);
+
+  }else{
+
+    marker.setLatLng(ll);
+
+    accuracyCircle.setLatLng(ll);
+
+    accuracyCircle.setRadius(p.accuracy);
+
+    if(follow)map.panTo(ll);
+
+  }
+
+}
+
+function onPosition(position){
+
+  if(!running)return;
+
+  const c=position.coords;
+
+  const p={
+
+    lat:c.latitude,
+
+    lon:c.longitude,
+
+    accuracy:c.accuracy,
+
+    t:position.timestamp
+
+  };
+
+  latest=p;
+
+  updateMap(p);
+
+  $("coords").textContent=
+
+    "位置："+p.lat.toFixed(5)+", "+p.lon.toFixed(5);
+
+  $("accuracy").textContent=
+
+    "定位精度：约 "+Math.round(p.accuracy)+" 米";
+
+  const good=p.accuracy<=35;
+
+  $("signal").textContent=good
+
+    ?"GPS 信号：良好":"GPS 信号：精度不足";
+
+  $("signal").className=good?"good":"warn";
+
+  if(!good){
+
+    $("status").textContent="状态：等待可靠 GPS";
+
+    last=null;
+
+    return;
+
+  }
+
+  if(!last){
+
+    last=p;
+
+    points++;
+
+    path.push([p.lat,p.lon]);
+
+    if(track)track.addLatLng([p.lat,p.lon]);
+
+  }else if(p.t>last.t){
+
+    const d=distanceBetween(last,p);
+
+    const dt=(p.t-last.t)/1000;
+
+    const speed=d/dt;
+
+    if(dt>30){
+
+      last=p;
+
+      path.push([p.lat,p.lon]);
+
+      if(track)track.setLatLngs(path);
+
+    }else if(
+
+      speed<=8 &&
+
+      d>=Math.max(3,(last.accuracy+p.accuracy)*0.35)
+
+    ){
+
+      meters+=d;
+
+      points++;
+
+      last=p;
+
+      path.push([p.lat,p.lon]);
+
+      if(track)track.addLatLng([p.lat,p.lon]);
+
+    }
+
+  }
+
+  $("status").textContent="状态：正在记录真实运动";
+
+  render();
+
+}
+
+function onError(e){
+
+  $("status").textContent="定位失败："+e.message;
+
+  stopRun(true);
+
+}
+
+function startRun(){
+
+  if(running)return;
+
+  if(!navigator.geolocation||!window.isSecureContext){
+
+    $("status").textContent="需要 HTTPS 和定位权限";
+
+    return;
+
+  }
+
+  running=true;
+
+  startedAt=Date.now();
+
+  last=null;
+
+  $("start").disabled=true;
+
+  $("pause").disabled=false;
+
+  $("status").textContent="正在获取 GPS...";
+
+  watchId=navigator.geolocation.watchPosition(
+
+    onPosition,onError,{
+
+      enableHighAccuracy:true,
+
+      maximumAge:0,
+
+      timeout:20000
+
+    }
+
+  );
+
+  clock=setInterval(render,1000);
+
+  render();
+
+}
+
+function stopRun(keepError=false){
+
+  if(running){
+
+    elapsed+=(Date.now()-startedAt)/1000;
+
+    running=false;
+
+  }
+
+  if(watchId!==null){
+
+    navigator.geolocation.clearWatch(watchId);
+
+    watchId=null;
+
+  }
+
+  if(clock!==null){
+
+    clearInterval(clock);
+
+    clock=null;
+
+  }
+
+  last=null;
+
+  $("start").disabled=false;
+
+  $("pause").disabled=true;
+
+  if(!keepError)$("status").textContent="状态：已暂停";
+
+  render();
+
+}
+
+function resetRun(){
+
+  stopRun();
+
+  meters=0;
+
+  points=0;
+
+  elapsed=0;
+
+  last=null;
+
+  path=[];
+
+  if(track)track.setLatLngs([]);
+
+  $("status").textContent="状态：等待开始";
+
+  render();
+
+}
+
+function getHistory(){
+
+  try{
+
+    return JSON.parse(localStorage.getItem("gpsHistory7")||"[]");
+
+  }catch(e){
+
+    return [];
+
+  }
+
+}
+
+function saveRecord(){
+
+  if(running){
+
+    alert("请先暂停，再保存记录");
+
+    return;
+
+  }
+
+  if(points<2){
+
+    alert("有效运动点不足，无法保存");
+
+    return;
+
+  }
+
+  const list=getHistory();
+
+  list.unshift({
+
+    date:new Date().toLocaleString(),
+
+    meters:Math.round(meters),
+
+    seconds:Math.floor(duration()),
+
+    points:points,
+
+    path:path
+
+  });
+
+  try{
+
+    localStorage.setItem(
+
+      "gpsHistory7",
+
+      JSON.stringify(list.slice(0,20))
+
+    );
+
+    showHistory();
+
+    alert("记录已保存到当前浏览器");
+
+  }catch(e){
+
+    alert("浏览器无法保存记录");
+
+  }
+
+}
+
+function showHistory(){
+
+  const list=getHistory();
+
+  const box=$("historyList");
+
+  box.replaceChildren();
+
+  if(!list.length){
+
+    box.textContent="暂无记录";
+
+    return;
+
+  }
+
+  list.forEach((r,i)=>{
+
+    const div=document.createElement("div");
+
+    div.className="record";
+
+    const info=document.createElement("div");
+
+    info.textContent=
+
+      r.date+"｜"+(r.meters/1000).toFixed(2)+
+
+      " km｜"+formatTime(r.seconds);
+
+    const btn=document.createElement("button");
+
+    btn.textContent="查看轨迹";
+
+    btn.onclick=()=>viewHistory(i);
+
+    div.append(info,btn);
+
+    box.appendChild(div);
+
+  });
+
+}
+
+function viewHistory(i){
+
+  const r=getHistory()[i];
+
+  if(!r||!map||!track||!r.path.length)return;
+
+  track.setLatLngs(r.path);
+
+  map.fitBounds(track.getBounds(),{
+
+    padding:[25,25],
+
+    maxZoom:18
+
+  });
+
+  follow=false;
+
+  $("follow").textContent="跟随：关闭";
+
+  $("status").textContent="状态：正在查看历史轨迹";
+
+}
+
+function clearHistory(){
+
+  if(confirm("确定清空所有历史记录吗？")){
+
+    localStorage.removeItem("gpsHistory7");
+
+    showHistory();
+
+  }
+
+}
+
+showHistory();
+
+render();
+
+</script>
